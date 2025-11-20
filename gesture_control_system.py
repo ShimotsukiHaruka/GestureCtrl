@@ -4,8 +4,8 @@ import pyautogui
 import time
 import sys
 import numpy as np
-import math
-import ctypes # <-- 导入 ctypes 用于调用 Windows API 锁屏
+import math 
+import ctypes # <-- 用于调用 Windows API 锁屏
 
 # --- 检查库是否正确安装 ---
 try:
@@ -34,12 +34,12 @@ if not cap.isOpened():
 # --- 配置控制参数 ---
 COOLDOWN_TIME = 1.0  # 手势触发冷却时间（秒）
 last_action_time = time.time() - COOLDOWN_TIME 
-scroll_threshold = 0.05 # 滚动触发的 Y 轴归一化移动阈值
+scroll_threshold = 0.03 # 滚动触发的 Y 轴归一化移动阈值
 SCROLL_SPEED = 15      # 每次滚动操作的幅度
 
 # 模式控制状态
 scroll_mode_active = False 
-last_scroll_y = 0.5        # 用于跟踪食指的Y坐标
+last_scroll_y = 0.5        # 用于跟踪手腕的Y坐标
 
 # 核心阈值（角度）
 STRAIGHT_ANGLE_THRESHOLD = 160 # 角度大于 160 度视为伸直（四指）
@@ -53,8 +53,11 @@ FINGER_JOINTS = [
     [17, 18, 20]  # 小指
 ]
 
-# --- 核心函数：计算三点夹角 (保持不变) ---
+# --- 核心函数：计算三点夹角 ---
 def calculate_angle(p1, p2, p3):
+    """
+    计算由三个关键点 p1, p2, p3 形成的夹角，p2 为顶点。
+    """
     p1_coords = np.array([p1.x, p1.y, p1.z])
     p2_coords = np.array([p2.x, p2.y, p2.z])
     p3_coords = np.array([p3.x, p3.y, p3.z])
@@ -76,8 +79,9 @@ def calculate_angle(p1, p2, p3):
     
     return angle_deg
 
-# --- 核心函数：判断手指状态 (保持不变) ---
+# --- 核心函数：判断手指状态 ---
 def is_finger_straight(hand_landmarks, joints, threshold):
+    """判断手指是否伸直（夹角是否大于阈值）。"""
     p_mcp = hand_landmarks.landmark[joints[0]]
     p_pip = hand_landmarks.landmark[joints[1]]
     p_tip = hand_landmarks.landmark[joints[2]]
@@ -86,7 +90,7 @@ def is_finger_straight(hand_landmarks, joints, threshold):
     
     return angle > threshold
 
-# --- 核心手势识别函数（V11.0 逻辑） ---
+# --- 核心手势识别函数（V11.8 逻辑） ---
 def get_hand_gesture(hand_landmarks):
     
     # 关键点索引常量
@@ -96,9 +100,9 @@ def get_hand_gesture(hand_landmarks):
     
     # 1. 判断拇指状态
     thumb_angle = calculate_angle(
-        hand_landmarks.landmark[THUMB_CMC],      
+        hand_landmarks.landmark[THUMB_CMC],       
         hand_landmarks.landmark[THUMB_MP_INDEX], 
-        hand_landmarks.landmark[THUMB_IP]        
+        hand_landmarks.landmark[THUMB_IP]         
     )
     thumb_open = thumb_angle > BENT_ANGLE_THRESHOLD
 
@@ -119,49 +123,58 @@ def get_hand_gesture(hand_landmarks):
     if not thumb_open and index_open and middle_open and not ring_open and not pinky_open:
         return "V_SIGN"
     
-    # 👆 POINTING (食指伸出) -> 滚动模式切换
-    elif not thumb_open and index_open and not middle_open and not ring_open and not pinky_open:
+    # 👎 THUMB_DOWN (拇指向下) -> 向下滚动/刷下一条
+    # 逻辑：拇指伸直 (open)，其他四指全部收拢 (not open)
+    elif thumb_open and not index_open and not middle_open and not ring_open and not pinky_open:
+        return "THUMB_DOWN" 
+
+    # 📐 L_SHAPE (L 形手势) -> 滚动模式切换
+    # 逻辑：拇指伸直 (open)，食指伸直 (open)，其他三指收拢 (not open)
+    elif thumb_open and index_open and not middle_open and not ring_open and not pinky_open:
         return "SCROLL_MODE_TOGGLE"
 
-    # ✋ OPEN_HAND (张开手掌) -> 窗口最大化 (功能恢复)
+    # ✋ OPEN_HAND (张开手掌) -> 窗口最大化 (五指全开)
     elif all(all_fingers_open):
         return "OPEN_HAND"
         
-    # ✊ CLOSED_FIST (握拳) -> 窗口缩小/最小化
-    elif not index_open and not middle_open and not ring_open and not pinky_open:
-         return "CLOSED_FIST"
-    
-    # 移除了所有其他不用的手势，如 THUMB_UP
+    # 🖐️ THREE_FINGER_CLENCH (三指并拢) -> 窗口缩小/最小化 (新逻辑)
+    # 逻辑：拇指收拢，小指收拢，食指、中指、无名指伸直
+    elif not thumb_open and index_open and middle_open and ring_open and not pinky_open:
+         return "THREE_FINGER_CLENCH" # <--- 最小化新手势
     
     return "UNKNOWN"
 
-# --- 滚动控制函数：基于食指 Y 轴移动 (保持不变) ---
-def control_scroll_by_index(hand_landmarks):
+# --- 滚动控制函数：基于手腕 Y 轴移动 (手掌移动) ---
+def control_scroll_by_palm(hand_landmarks):
+    """根据手腕关键点 (WRIST) 的Y坐标变化来模拟鼠标滚轮操作。"""
     global last_scroll_y, SCROLL_SPEED, scroll_threshold
     
-    current_y = hand_landmarks.landmark[mp_hands.HandLandmark.INDEX_FINGER_TIP.value].y
+    # 使用 WRIST 关键点 (索引 0) 作为手掌的中心点
+    current_y = hand_landmarks.landmark[mp_hands.HandLandmark.WRIST.value].y
     
     y_diff = current_y - last_scroll_y
     scroll_action = None
     
-    if y_diff > scroll_threshold: 
+    # Y轴向下增大。手掌向下移动 (current_y > last_scroll_y) 意味着向下滚动页面。
+    if y_diff > scroll_threshold: # Y轴增大，向下滚动页面
         pyautogui.scroll(-SCROLL_SPEED) 
         scroll_action = "DOWN"
-    elif y_diff < -scroll_threshold:
+    elif y_diff < -scroll_threshold: # Y轴减小，向上滚动页面
         pyautogui.scroll(SCROLL_SPEED) 
         scroll_action = "UP"
 
+    # 实时更新位置，使滚动更平滑
     last_scroll_y = current_y
     return scroll_action
     
 # --- 主循环 ---
-print("=== V11.0 稳定版手势控制系统 (窗口最大化恢复) ===")
+print("=== V11.8 稳定版手势控制系统 (三指并拢 最小化) ===")
 print("手势功能说明：")
-print("✌️ V字手势 -> **锁定屏幕 (API)**")
-print("✋ 张开手掌 -> **窗口最大化 (win+up)**")
-print("✊ 握拳 (四指弯曲) -> 窗口缩小/最小化 (win+down)") 
-print("👆 食指伸出 -> **模式切换：激活/退出 食指滚动模式**")
-print("↔️ (滚动模式激活时) 食指上下移动 -> 页面滚动")
+print("✌️ V字手势 -> 锁定屏幕 (Win API)")
+print("👎 拇指向下 (Thumbs Down) -> 向下滚动 (自动刷短视频)")
+print("📐 L形手势 (拇指、食指伸直) -> 模式切换：激活/退出 手掌滚动模式")
+print("✋ 张开手掌 -> 窗口最大化 (win+up)")
+print("🖐️ 三指并拢 (食中无伸直，拇小指收拢) -> **窗口缩小/最小化 (win+down)**")
 print("在视频窗口中按 'q' 键退出。")
 
 while cap.isOpened():
@@ -169,7 +182,7 @@ while cap.isOpened():
     if not ret:
         break
 
-    frame = cv2.flip(frame, 1)
+    frame = cv2.flip(frame, 1) # 镜像翻转
     rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     
     results = hands.process(rgb_frame)
@@ -188,23 +201,25 @@ while cap.isOpened():
 
         # --- 手势功能执行逻辑 ---
             
-        # 模式切换控制 (食指伸出)
+        # 模式切换控制 (L形手势)
         if current_gesture == "SCROLL_MODE_TOGGLE":
-             if current_time - last_action_time > COOLDOWN_TIME:
+            if current_time - last_action_time > COOLDOWN_TIME:
                 scroll_mode_active = not scroll_mode_active
-                print(f"🔄 模式切换 (食指): 滚动模式 {'已激活' if scroll_mode_active else '已退出'}")
+                print(f"🔄 模式切换 (L形): 滚动模式 {'已激活' if scroll_mode_active else '已退出'}")
                 
                 if scroll_mode_active:
-                     last_scroll_y = hand_landmarks.landmark[mp_hands.HandLandmark.INDEX_FINGER_TIP.value].y
-                     
+                    # 激活时重置跟踪位置，使用 WRIST (索引 0)
+                    last_scroll_y = hand_landmarks.landmark[mp_hands.HandLandmark.WRIST.value].y
+                    
                 last_action_time = current_time
                 gesture_detected = True
         
         # 1. 滚动模式激活时，只执行滚动操作
         if scroll_mode_active:
-            scroll_action = control_scroll_by_index(hand_landmarks)
+            # *** 调用手掌滚动函数 ***
+            scroll_action = control_scroll_by_palm(hand_landmarks) 
             if scroll_action:
-                cv2.putText(frame, f"SCROLLING: {scroll_action.upper()}", (10, 60), 
+                cv2.putText(frame, f"PALM SCROLLING: {scroll_action.upper()}", (10, 60), 
                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
             
             current_gesture = "SCROLL_ACTIVE" 
@@ -219,13 +234,18 @@ while cap.isOpened():
                 ctypes.windll.user32.LockWorkStation()
                 action_performed = "锁定屏幕 (API)"
                 
+            elif current_gesture == "THUMB_DOWN": 
+                # *** 自动刷短视频/向下滚动功能 (拇指向下) ***
+                pyautogui.scroll(-20) 
+                action_performed = "向下滚动 (刷下一条)"
+            
             elif current_gesture == "OPEN_HAND":
                 # *** 窗口最大化功能 (张开手掌) ***
                 pyautogui.hotkey('win', 'up')
                 action_performed = "窗口最大化"
 
-            elif current_gesture == "CLOSED_FIST":
-                # *** 窗口缩小/最小化功能 (握拳) ***
+            elif current_gesture == "THREE_FINGER_CLENCH": # <--- 触发最小化
+                # *** 窗口缩小/最小化功能 (三指并拢) ***
                 pyautogui.hotkey('win', 'down')
                 action_performed = "窗口缩小/最小化"
             
@@ -238,22 +258,29 @@ while cap.isOpened():
         display_text = f"GESTURE: {current_gesture}"
         mode_text = f"MODE: {'SCROLL' if scroll_mode_active else 'ACTIONS'}"
         
+        # 调整滚动模式下的文本显示位置，避免覆盖
+        mode_y_pos = 90 if scroll_mode_active else 60 
+        
         cv2.putText(frame, display_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-        mode_y_pos = 90 if scroll_mode_active else 60
         cv2.putText(frame, mode_text, (10, mode_y_pos), 
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 165, 0), 2)
 
 
     # 显示未检测到手的提示
     if not results.multi_hand_landmarks:
-         cv2.putText(frame, "No Hand Detected", (10, 30), 
+          cv2.putText(frame, "No Hand Detected", (10, 30), 
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+          # 退出滚动模式，防止误触
+          if scroll_mode_active:
+              scroll_mode_active = False
+              print("🚫 手部丢失，退出滚动模式。")
 
-    cv2.imshow('Robust Hand Gesture Control V11.0', frame)
+    cv2.imshow('Robust Hand Gesture Control V11.8', frame)
 
     if cv2.waitKey(1) & 0xFF == ord('q'):
         break
 
+# --- 资源释放 ---
 cap.release()
 cv2.destroyAllWindows()
 hands.close()
